@@ -5,12 +5,18 @@ import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { DEFAULT_PROMPT_TEMPLATE } from "../lib/prompts";
+import {
+  encrypt,
+  decrypt,
+  isEncrypted,
+  maskApiKey,
+} from "../lib/encryption.server";
 import type { ProductDataField } from "../lib/shopify-products.server";
 
 const AVAILABLE_FIELDS: Array<{ value: ProductDataField; label: string }> = [
   { value: "title", label: "Titel" },
   { value: "description", label: "Eksisterende beskrivelse" },
-  { value: "vendor", label: "Mærke" },
+  { value: "vendor", label: "Brand" },
   { value: "productType", label: "Produkttype" },
   { value: "tags", label: "Tags" },
   { value: "handle", label: "Handle (URL-slug)" },
@@ -27,6 +33,24 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     where: { shop },
   });
 
+  // Return masked API key for display - never send actual key to frontend
+  let maskedApiKey = "";
+  let hasApiKey = false;
+  if (template?.openaiApiKey) {
+    hasApiKey = true;
+    try {
+      if (isEncrypted(template.openaiApiKey)) {
+        const decrypted = decrypt(template.openaiApiKey);
+        maskedApiKey = maskApiKey(decrypted);
+      } else {
+        // Legacy plaintext key — mask it
+        maskedApiKey = maskApiKey(template.openaiApiKey);
+      }
+    } catch {
+      maskedApiKey = "••••••••";
+    }
+  }
+
   return {
     template: template?.template || "", // Empty by default - user adds customizations
     selectedFields: template?.selectedFields
@@ -38,7 +62,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
           "productType",
         ] as ProductDataField[]),
     customData: template?.customData || "",
-    openaiApiKey: template?.openaiApiKey || "",
+    maskedApiKey,
+    hasApiKey,
   };
 };
 
@@ -52,6 +77,27 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const customData = formData.get("customData") as string;
   const openaiApiKey = formData.get("openaiApiKey") as string;
 
+  // Encrypt the API key before storing, or keep existing if unchanged
+  let encryptedApiKey: string | null = null;
+  if (openaiApiKey && openaiApiKey !== "__unchanged__") {
+    try {
+      encryptedApiKey = encrypt(openaiApiKey);
+    } catch (e) {
+      console.error("Failed to encrypt API key:", e);
+      return {
+        success: false,
+        error: "Encryption failed. Check ENCRYPTION_KEY env var.",
+      };
+    }
+  } else if (openaiApiKey === "__unchanged__") {
+    // Keep existing value in DB
+    const existing = await prisma.promptTemplate.findUnique({
+      where: { shop },
+      select: { openaiApiKey: true },
+    });
+    encryptedApiKey = existing?.openaiApiKey || null;
+  }
+
   await prisma.promptTemplate.upsert({
     where: { shop },
     create: {
@@ -59,13 +105,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       template,
       selectedFields,
       customData: customData || null,
-      openaiApiKey: openaiApiKey || null,
+      openaiApiKey: encryptedApiKey,
     },
     update: {
       template,
       selectedFields,
       customData: customData || null,
-      openaiApiKey: openaiApiKey || null,
+      openaiApiKey: encryptedApiKey,
     },
   });
 
@@ -73,7 +119,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 export default function SettingsPage() {
-  const { template, selectedFields, customData, openaiApiKey } =
+  const { template, selectedFields, customData, maskedApiKey, hasApiKey } =
     useLoaderData<typeof loader>();
   const fetcher = useFetcher<typeof action>();
   const shopify = useAppBridge();
@@ -81,7 +127,8 @@ export default function SettingsPage() {
   const [localSelectedFields, setLocalSelectedFields] =
     useState<ProductDataField[]>(selectedFields);
   const [localCustomData, setLocalCustomData] = useState(customData);
-  const [localOpenaiApiKey, setLocalOpenaiApiKey] = useState(openaiApiKey);
+  const [localOpenaiApiKey, setLocalOpenaiApiKey] = useState("");
+  const [apiKeyChanged, setApiKeyChanged] = useState(false);
 
   useEffect(() => {
     if (fetcher.data?.success) {
@@ -100,12 +147,17 @@ export default function SettingsPage() {
     formData.append("template", localTemplate);
     formData.append("selectedFields", JSON.stringify(localSelectedFields));
     formData.append("customData", localCustomData);
-    formData.append("openaiApiKey", localOpenaiApiKey);
+    // Send new key if changed, or sentinel to keep existing
+    formData.append(
+      "openaiApiKey",
+      apiKeyChanged ? localOpenaiApiKey : "__unchanged__",
+    );
     fetcher.submit(formData, { method: "POST" });
   };
 
   return (
-    <s-page heading="Indstillinger" inlineSize="base">
+    <s-page heading="Indstillinger" inlineSize="large">
+      {/* biome-ignore lint/a11y/noStaticElementInteractions: <s-button> is a Shopify web component that is inherently interactive */}
       <s-button
         slot="primary-action"
         onClick={handleSave}
@@ -114,12 +166,23 @@ export default function SettingsPage() {
         Gem indstillinger
       </s-button>
 
+      <s-section heading="Tips">
+        <s-unordered-list>
+          <s-list-item>
+            Prompt-skabelonen bestemmer, hvordan AI&apos;en genererer
+            beskrivelser
+          </s-list-item>
+          <s-list-item>
+            Vælg kun de produktdata, der er relevante for jer
+          </s-list-item>
+          <s-list-item>
+            Tilpasset data inkluderes i alle prompts, uanset hvilke produkter
+            der genereres
+          </s-list-item>
+        </s-unordered-list>
+      </s-section>
+
       <s-section heading="Base-prompt (kun læsning)">
-        <s-paragraph>
-          Dette er base-prompten, der altid bruges. Den indeholder alle
-          grundlæggende regler for HTML-elementer, dansk grammatik, SEO-krav og
-          strukturelle retningslinjer.
-        </s-paragraph>
         <s-box
           padding="base"
           borderWidth="base"
@@ -142,32 +205,18 @@ export default function SettingsPage() {
 
       <s-section heading="Tilpasset prompt (tilføjelser)">
         <s-paragraph>
-          Tilføj dine egne instruktioner og tilpasninger her. Disse bliver
-          automatisk tilføjet efter base-prompten ved generering. Du kan tilføje
-          stil-retningslinjer, brand-voice, specifikke krav eller andre
-          instruktioner.
+          Tilføj dine egne instruktioner her. De kombineres med base-prompten.
+          Eksempler: specifik brand-voice, sæsonbetoning, kampagnefokus, eller
+          instruktioner om bestemte produktkategorier.
         </s-paragraph>
-        <s-box
-          padding="base"
-          borderWidth="base"
-          borderRadius="base"
-          background="subdued"
-        >
-          <textarea
-            value={localTemplate}
-            onChange={(e) => setLocalTemplate(e.target.value)}
-            placeholder="Tilføj dine egne instruktioner her, f.eks. stil-retningslinjer, brand-voice, eller specifikke krav..."
-            style={{
-              width: "100%",
-              minHeight: "200px",
-              fontFamily: "inherit",
-              fontSize: "14px",
-              padding: "12px",
-              border: "1px solid #ccc",
-              borderRadius: "4px",
-            }}
-          />
-        </s-box>
+        <s-text-area
+          label="Tilpasset prompt"
+          labelAccessibilityVisibility="exclusive"
+          value={localTemplate}
+          onInput={(e: Event) => setLocalTemplate((e.currentTarget as HTMLTextAreaElement).value)}
+          placeholder="Tilføj dine egne instruktioner her, f.eks. stil-retningslinjer, brand-voice, eller specifikke krav..."
+          rows={8}
+        />
         <s-paragraph>
           <s-text>
             Dine tilpasninger bliver automatisk kombineret med base-prompten ved
@@ -182,61 +231,48 @@ export default function SettingsPage() {
         </s-paragraph>
         <s-stack direction="block" gap="base">
           {AVAILABLE_FIELDS.map((field) => (
-            <label
+            <s-checkbox
               key={field.value}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: "8px",
-                cursor: "pointer",
-              }}
-            >
-              <input
-                type="checkbox"
-                checked={localSelectedFields.includes(field.value)}
-                onChange={() => handleFieldToggle(field.value)}
-                style={{ cursor: "pointer" }}
-              />
-              <span>{field.label}</span>
-            </label>
+              label={field.label}
+              checked={localSelectedFields.includes(field.value)}
+              onChange={() => handleFieldToggle(field.value)}
+            />
           ))}
         </s-stack>
       </s-section>
 
       <s-section heading="OpenAI API-nøgle">
         <s-paragraph>
-          Indtast din OpenAI API-nøgle. Hvis ikke angivet, bruges miljøvariablen
-          OPENAI_API_KEY. Du kan få en API-nøgle fra{" "}
-          <s-link href="https://platform.openai.com/api-keys" target="_blank">
-            OpenAI's platform
+          Indtast din OpenAI API-nøgle. Du kan få en API-nøgle fra{" "}
+          <s-link href="https://platform.openai.com/settings/organization/api-keys" target="_blank">
+            OpenAI&apos;s platform
           </s-link>
           .
         </s-paragraph>
-        <s-box
-          padding="base"
-          borderWidth="base"
-          borderRadius="base"
-          background="subdued"
-        >
-          <input
-            type="password"
-            value={localOpenaiApiKey}
-            onChange={(e) => setLocalOpenaiApiKey(e.target.value)}
-            placeholder="sk-..."
-            style={{
-              width: "100%",
-              fontFamily: "monospace",
-              fontSize: "14px",
-              padding: "12px",
-              border: "1px solid #ccc",
-              borderRadius: "4px",
-            }}
-          />
-        </s-box>
-        {localOpenaiApiKey && (
+        <s-password-field
+          label="API-nøgle"
+          labelAccessibilityVisibility="exclusive"
+          value={localOpenaiApiKey}
+          onInput={(e: Event) => {
+            setLocalOpenaiApiKey((e.currentTarget as HTMLInputElement).value);
+            setApiKeyChanged(true);
+          }}
+          placeholder={hasApiKey ? maskedApiKey : "sk-..."}
+          autocomplete="off"
+        />
+        {hasApiKey && !apiKeyChanged && (
           <s-paragraph>
             <s-text>
-              API-nøgle er konfigureret (skjult af sikkerhedsmæssige årsager)
+              API-nøgle er gemt (krypteret). Indtast en ny nøgle for at ændre
+              den.
+            </s-text>
+          </s-paragraph>
+        )}
+        {apiKeyChanged && localOpenaiApiKey && (
+          <s-paragraph>
+            <s-text>
+              Ny API-nøgle vil blive krypteret og gemt når du gemmer
+              indstillinger.
             </s-text>
           </s-paragraph>
         )}
@@ -247,45 +283,14 @@ export default function SettingsPage() {
           Tilføj yderligere information, der skal inkluderes i alle prompts
           (f.eks. brand- eller forhandler-specifikke detaljer):
         </s-paragraph>
-        <s-box
-          padding="base"
-          borderWidth="base"
-          borderRadius="base"
-          background="subdued"
-        >
-          <textarea
-            value={localCustomData}
-            onChange={(e) => setLocalCustomData(e.target.value)}
-            placeholder="F.eks. 'Alle produkter er miljøvenlige og produceret i Danmark'"
-            style={{
-              width: "100%",
-              minHeight: "100px",
-              fontFamily: "inherit",
-              fontSize: "14px",
-              padding: "12px",
-              border: "1px solid #ccc",
-              borderRadius: "4px",
-            }}
-          />
-        </s-box>
-      </s-section>
-
-      <s-section slot="aside" heading="Tips">
-        <s-unordered-list>
-          <s-list-item>
-            Prompt-skabelonen bestemmer, hvordan AI'en genererer beskrivelser
-          </s-list-item>
-          <s-list-item>
-            Vælg kun de produktdata, der er relevante for din virksomhed
-          </s-list-item>
-          <s-list-item>
-            Tilpasset data inkluderes i alle prompts, uanset hvilke produkter
-            der genereres
-          </s-list-item>
-          <s-list-item>
-            API-nøgle gemmes sikkert i databasen og overskriver miljøvariablen
-          </s-list-item>
-        </s-unordered-list>
+        <s-text-area
+          label="Tilpasset data"
+          labelAccessibilityVisibility="exclusive"
+          value={localCustomData}
+          onInput={(e: Event) => setLocalCustomData((e.currentTarget as HTMLTextAreaElement).value)}
+          placeholder="F.eks. 'Alle produkter er miljøvenlige og produceret i Danmark'"
+          rows={4}
+        />
       </s-section>
     </s-page>
   );

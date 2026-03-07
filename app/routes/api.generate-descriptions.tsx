@@ -3,6 +3,7 @@ import { authenticate } from "../shopify.server";
 import { fetchProductById } from "../lib/shopify-products.server";
 import { generateMultipleDescriptions } from "../lib/ai.server";
 import prisma from "../db.server";
+import { decrypt, isEncrypted } from "../lib/encryption.server";
 import type { ProductDataField } from "../lib/shopify-products.server";
 
 export const action = async ({ request }: ActionFunctionArgs) => {
@@ -56,6 +57,25 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       return Response.json({ error: "No valid products found" }, { status: 400 });
     }
 
+    // Decrypt API key if stored encrypted
+    let apiKey: string | undefined;
+    if (templateRecord?.openaiApiKey) {
+      try {
+        if (isEncrypted(templateRecord.openaiApiKey)) {
+          apiKey = decrypt(templateRecord.openaiApiKey);
+        } else {
+          // Legacy plaintext key — use as-is
+          apiKey = templateRecord.openaiApiKey;
+        }
+      } catch (e) {
+        console.error("Failed to decrypt API key:", e);
+        return Response.json(
+          { error: "Failed to decrypt API key. Check ENCRYPTION_KEY env var." },
+          { status: 500 },
+        );
+      }
+    }
+
     // Generate descriptions with progress tracking
     // Pass user customizations (empty string if none) - base template is always included
     const results = await generateMultipleDescriptions(
@@ -67,7 +87,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         // Progress callback - could be used for streaming updates in the future
         console.log(`Progress: ${completed}/${total}`);
       },
-      templateRecord?.openaiApiKey || undefined
+      apiKey
     );
 
     // Convert Map to object for JSON response
@@ -85,6 +105,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       total: validProducts.length,
       completed: Array.from(results.values()).filter((r) => !r.error).length,
       errors: Array.from(results.values()).filter((r) => r.error).length,
+
     });
   } catch (error) {
     console.error("Error generating descriptions:", error);

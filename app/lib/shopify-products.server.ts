@@ -1,5 +1,12 @@
 import type { AdminApiContext } from "@shopify/shopify-app-react-router/server";
 
+/** Check if HTML string has actual visible text content */
+function hasTextContent(html: string | null | undefined): string | undefined {
+  if (!html) return undefined;
+  const stripped = html.replace(/<[^>]*>/g, "").trim();
+  return stripped.length > 0 ? html : undefined;
+}
+
 export type ProductDataField =
   | "title"
   | "description"
@@ -11,12 +18,37 @@ export type ProductDataField =
   | "materials"
   | "handle";
 
+interface ProductEdge {
+  node: {
+    id: string;
+    title?: string;
+    descriptionHtml?: string;
+    vendor?: string;
+    productType?: string;
+    status?: string;
+    tags?: string[];
+    handle?: string;
+    featuredImage?: { url?: string };
+    metafields?: { edges?: MetafieldEdge[] };
+    variants?: { edges?: VariantEdge[] };
+  };
+}
+
+interface MetafieldEdge {
+  node: { key: string; value: string };
+}
+
+interface VariantEdge {
+  node: { title: string; price: string };
+}
+
 export interface ProductData {
   id: string;
   title?: string;
   description?: string;
   vendor?: string;
   productType?: string;
+  status?: string;
   tags?: string[];
   metafields?: Array<{ key: string; value: string }>;
   variants?: Array<{ title: string; price: string }>;
@@ -46,9 +78,10 @@ export async function fetchProducts(
             node {
               id
               title
-              description
+              descriptionHtml
               vendor
               productType
+              status
               tags
               handle
               featuredImage {
@@ -86,28 +119,29 @@ export async function fetchProducts(
   const responseJson = await response.json();
   const productsData = responseJson.data?.products;
 
-  const products: ProductData[] = productsData.edges.map((edge: any) => {
+  const products: ProductData[] = productsData.edges.map((edge: ProductEdge) => {
     const node = edge.node;
     return {
       id: node.id,
       title: node.title || undefined,
-      description: node.description || undefined,
+      description: hasTextContent(node.descriptionHtml),
       vendor: node.vendor || undefined,
       productType: node.productType || undefined,
+      status: node.status || undefined,
       tags: node.tags || [],
       handle: node.handle || undefined,
       featuredImage: node.featuredImage?.url || undefined,
-      metafields: node.metafields?.edges?.map((e: any) => ({
+      metafields: node.metafields?.edges?.map((e: MetafieldEdge) => ({
         key: e.node.key,
         value: e.node.value,
       })) || [],
-      variants: node.variants?.edges?.map((e: any) => ({
+      variants: node.variants?.edges?.map((e: VariantEdge) => ({
         title: e.node.title,
         price: e.node.price,
       })) || [],
       // Extract materials from metafields if available
       materials: node.metafields?.edges?.find(
-        (e: any) => e.node.key?.toLowerCase().includes("material")
+        (e: MetafieldEdge) => e.node.key?.toLowerCase().includes("material")
       )?.node?.value || undefined,
     };
   });
@@ -129,9 +163,10 @@ export async function fetchProductById(
         product(id: $id) {
           id
           title
-          description
+          descriptionHtml
           vendor
           productType
+          status
           tags
           handle
           featuredImage {
@@ -173,22 +208,23 @@ export async function fetchProductById(
   return {
     id: product.id,
     title: product.title || undefined,
-    description: product.description || undefined,
+    description: hasTextContent(product.descriptionHtml),
     vendor: product.vendor || undefined,
     productType: product.productType || undefined,
+    status: product.status || undefined,
     tags: product.tags || [],
     handle: product.handle || undefined,
     featuredImage: product.featuredImage?.url || undefined,
-    metafields: product.metafields?.edges?.map((e: any) => ({
+    metafields: product.metafields?.edges?.map((e: MetafieldEdge) => ({
       key: e.node.key,
       value: e.node.value,
     })) || [],
-    variants: product.variants?.edges?.map((e: any) => ({
+    variants: product.variants?.edges?.map((e: VariantEdge) => ({
       title: e.node.title,
       price: e.node.price,
     })) || [],
     materials: product.metafields?.edges?.find(
-      (e: any) => e.node.key?.toLowerCase().includes("material")
+      (e: MetafieldEdge) => e.node.key?.toLowerCase().includes("material")
     )?.node?.value || undefined,
   };
 }
@@ -242,10 +278,35 @@ export function extractProductDataForPrompt(
     parts.push(`Varianter:\n${variantInfo}`);
   }
 
-  if (customData && customData.trim()) {
+  if (customData?.trim()) {
     parts.push(`Yderligere information: ${customData}`);
   }
 
   return parts.join("\n\n");
+}
+
+/**
+ * Fetch ALL products from the store by paginating through all pages server-side.
+ * Returns a flat array of all products.
+ */
+export async function fetchAllProducts(
+  admin: AdminApiContext,
+): Promise<ProductData[]> {
+  const allProducts: ProductData[] = [];
+  let cursor: string | undefined;
+  let hasMore = true;
+
+  while (hasMore) {
+    const { products, hasNextPage, endCursor } = await fetchProducts(
+      admin,
+      50, // Keep batch size moderate to avoid exceeding Shopify's query cost budget
+      cursor,
+    );
+    allProducts.push(...products);
+    hasMore = hasNextPage;
+    cursor = endCursor;
+  }
+
+  return allProducts;
 }
 
