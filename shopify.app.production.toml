@@ -1,8 +1,8 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 
-client_id = "c1f8924cb39172a6c9a184ba8d8558e5"
+client_id = "ff6b0af2c297aa13fa7d2dc1658eb010"
 name = "AI SEO Produktbeskrivelser"
-application_url = "https://example.com"
+application_url = "https://kyoto-ai-seo-descriptions.jacobfriisstrand.com"
 embedded = true
 
 [build]
@@ -10,15 +10,7 @@ automatically_update_urls_on_dev = true
 include_config_on_deploy = true
 
 [webhooks]
-api_version = "2026-01"
-
-  [[webhooks.subscriptions]]
-  topics = [ "app/scopes_update" ]
-  uri = "/webhooks/app/scopes_update"
-
-  [[webhooks.subscriptions]]
-  topics = [ "app/uninstalled" ]
-  uri = "/webhooks/app/uninstalled"
+api_version = "2026-04"
 
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
@@ -28,4 +20,4 @@ scopes = "write_products"
 type = "single_merchant"
 
 [auth]
-redirect_urls = [ "https://example.com/auth/callback" ]
+redirect_urls = [ "https://kyoto-ai-seo-descriptions.jacobfriisstrand.com/auth/callback" ]
