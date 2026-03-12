@@ -6,7 +6,13 @@ import { AppProvider } from "@shopify/shopify-app-react-router/react";
 import { authenticate } from "../shopify.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  await authenticate.admin(request);
+  try {
+    await authenticate.admin(request);
+  } catch (error) {
+    if (error instanceof Response) throw error;
+    console.error("[app] Authentication error:", error);
+    throw error;
+  }
 
   // eslint-disable-next-line no-undef
   return { apiKey: process.env.SHOPIFY_API_KEY || "" };

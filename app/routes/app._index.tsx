@@ -16,7 +16,16 @@ interface GeneratedDescription {
 }
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { admin, session } = await authenticate.admin(request);
+  let admin: Awaited<ReturnType<typeof authenticate.admin>>["admin"];
+  let session: Awaited<ReturnType<typeof authenticate.admin>>["session"];
+  try {
+    ({ admin, session } = await authenticate.admin(request));
+  } catch (error) {
+    // Re-throw Response objects (redirects from Shopify auth)
+    if (error instanceof Response) throw error;
+    console.error("[app._index] Authentication error:", error);
+    throw error;
+  }
   const shop = session.shop;
 
   const url = new URL(request.url);
@@ -79,7 +88,14 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { admin } = await authenticate.admin(request);
+  let admin: Awaited<ReturnType<typeof authenticate.admin>>["admin"];
+  try {
+    ({ admin } = await authenticate.admin(request));
+  } catch (error) {
+    if (error instanceof Response) throw error;
+    console.error("[app._index action] Authentication error:", error);
+    return { error: "Autentificeringsfejl. Prøv at genindlæse siden." };
+  }
 
   const formData = await request.formData();
   const actionType = formData.get("action") as string;
@@ -723,7 +739,7 @@ export default function ProductsPage() {
   return (
     <s-page heading="Produkter" inlineSize="large">
       {loadError && (
-        <s-banner variant="critical">{loadError}</s-banner>
+        <s-banner tone="critical">{loadError}</s-banner>
       )}
       <s-section heading="Tips">
         <s-unordered-list>
