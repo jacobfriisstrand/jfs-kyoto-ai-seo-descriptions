@@ -24,40 +24,58 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   // If cursor is provided, this is a "load more" request — return JSON
   if (cursor) {
+    try {
+      const { products, hasNextPage, endCursor } = await fetchProducts(
+        admin,
+        50,
+        cursor,
+      );
+      return { products, hasNextPage, endCursor, isLoadMore: true };
+    } catch (error) {
+      console.error("[app._index] Error loading more products:", error);
+      return { products: [], hasNextPage: false, endCursor: undefined, isLoadMore: true };
+    }
+  }
+
+  try {
+    // Initial load: first batch + settings
     const { products, hasNextPage, endCursor } = await fetchProducts(
       admin,
       50,
-      cursor,
     );
-    return { products, hasNextPage, endCursor, isLoadMore: true };
+
+    // Get prompt template settings
+    const template = await prisma.promptTemplate.findUnique({
+      where: { shop },
+    });
+
+    return {
+      products,
+      hasNextPage,
+      endCursor,
+      isLoadMore: false,
+      selectedFields: template?.selectedFields
+        ? (JSON.parse(template.selectedFields) as ProductDataField[])
+        : ([
+            "title",
+            "description",
+            "vendor",
+            "productType",
+          ] as ProductDataField[]),
+      customData: template?.customData || "",
+    };
+  } catch (error) {
+    console.error("[app._index] Error loading products:", error);
+    return {
+      products: [],
+      hasNextPage: false,
+      endCursor: undefined,
+      isLoadMore: false,
+      selectedFields: ["title", "description", "vendor", "productType"] as ProductDataField[],
+      customData: "",
+      loadError: "Der opstod en fejl ved indlæsning af produkter. Prøv at genindlæse siden.",
+    };
   }
-
-  // Initial load: first batch + settings
-  const { products, hasNextPage, endCursor } = await fetchProducts(
-    admin,
-    50,
-  );
-
-  // Get prompt template settings
-  const template = await prisma.promptTemplate.findUnique({
-    where: { shop },
-  });
-
-  return {
-    products,
-    hasNextPage,
-    endCursor,
-    isLoadMore: false,
-    selectedFields: template?.selectedFields
-      ? (JSON.parse(template.selectedFields) as ProductDataField[])
-      : ([
-          "title",
-          "description",
-          "vendor",
-          "productType",
-        ] as ProductDataField[]),
-    customData: template?.customData || "",
-  };
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
@@ -700,8 +718,13 @@ export default function ProductsPage() {
   const modalDisplayDescription =
     modalEdited || modalGenerated?.description;
 
+  const loadError = ("loadError" in loaderData ? loaderData.loadError : undefined) as string | undefined;
+
   return (
     <s-page heading="Produkter" inlineSize="large">
+      {loadError && (
+        <s-banner variant="critical">{loadError}</s-banner>
+      )}
       <s-section heading="Tips">
         <s-unordered-list>
           <s-list-item>
