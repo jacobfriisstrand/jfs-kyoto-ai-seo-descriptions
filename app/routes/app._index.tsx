@@ -31,7 +31,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const url = new URL(request.url);
   const cursor = url.searchParams.get("cursor") || undefined;
 
-  // If cursor is provided, this is a "load more" request — return JSON
+  // If cursor is provided, this is a page navigation request
   if (cursor) {
     try {
       const { products, hasNextPage, endCursor } = await fetchProducts(
@@ -231,9 +231,10 @@ export default function ProductsPage() {
   const generateFetcher = useFetcher();
   const lastProcessedGeneration = useRef<unknown>(null);
   const loadMoreFetcher = useFetcher<typeof loader>();
+  const lastProcessedLoadMore = useRef<unknown>(null);
   const shopify = useAppBridge();
 
-  // Accumulate all products across pages
+  // Accumulate all products across pages for sorting/filtering
   const [allProducts, setAllProducts] = useState<ProductData[]>(
     loaderData.products,
   );
@@ -242,6 +243,8 @@ export default function ProductsPage() {
   );
   const [hasMore, setHasMore] = useState(loaderData.hasNextPage);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
+  const ITEMS_PER_PAGE = 50;
   const selectedFields = ("selectedFields" in loaderData
     ? loaderData.selectedFields
     : ["title", "description", "vendor", "productType"]) as ProductDataField[];
@@ -378,6 +381,9 @@ export default function ProductsPage() {
           isError: true,
         });
       }
+      // Go to page 1 and scroll to top so generated descriptions are visible
+      setCurrentPage(1);
+      window.scrollTo({ top: 0, behavior: "smooth" });
     }
     if (generateFetcher.data?.error && generateFetcher.data !== lastProcessedGeneration.current) {
       lastProcessedGeneration.current = generateFetcher.data;
@@ -390,10 +396,17 @@ export default function ProductsPage() {
 
   // Auto-load all remaining products in background
   useEffect(() => {
-    if (loadMoreFetcher.data && loadMoreFetcher.state === "idle") {
+    if (loadMoreFetcher.data && loadMoreFetcher.state === "idle" && loadMoreFetcher.data !== lastProcessedLoadMore.current) {
+      lastProcessedLoadMore.current = loadMoreFetcher.data;
       const data = loadMoreFetcher.data;
       if ("products" in data && Array.isArray(data.products)) {
-        setAllProducts((prev) => [...prev, ...data.products]);
+        setAllProducts((prev) => {
+          const existingIds = new Set(prev.map((p) => p.id));
+          const newProducts = data.products.filter(
+            (p: ProductData) => !existingIds.has(p.id),
+          );
+          return [...prev, ...newProducts];
+        });
         setHasMore(data.hasNextPage ?? false);
         setNextCursor(data.endCursor ?? undefined);
         setIsLoadingMore(false);
@@ -543,8 +556,7 @@ export default function ProductsPage() {
   const [titleSort, setTitleSort] = useState<"none" | "asc" | "desc">("none");
   const [typeSort, setTypeSort] = useState<"none" | "asc" | "desc">("none");
   const [statusSort, setStatusSort] = useState<"none" | "asc" | "desc">("none");
-  const [visibleCount, setVisibleCount] = useState(50);
-  const sentinelRef = useRef<HTMLDivElement>(null);
+  const [stockSort, setStockSort] = useState<"none" | "asc" | "desc">("none");
   const hasGeneratedDescriptions = generatedDescriptions.size > 0;
   const hasSelectedProducts = selectedProductIds.size > 0;
 
@@ -593,6 +605,14 @@ export default function ProductsPage() {
       if (cmp !== 0) return statusSort === "asc" ? cmp : -cmp;
     }
 
+    // Stock sort
+    if (stockSort !== "none") {
+      const aStock = a.totalInventory ?? 0;
+      const bStock = b.totalInventory ?? 0;
+      const cmp = aStock - bStock;
+      if (cmp !== 0) return stockSort === "asc" ? cmp : -cmp;
+    }
+
     // Description sort
     if (descriptionSort !== "none") {
       const aHasDesc = !!a.description;
@@ -619,26 +639,12 @@ export default function ProductsPage() {
       })
     : sortedProducts;
 
-  // Lazy load: only show visibleCount products
-  const displayedProducts = filteredProducts.slice(0, visibleCount);
-
-  // Intersection observer for infinite scroll
-  useEffect(() => {
-    const sentinel = sentinelRef.current;
-    if (!sentinel) return;
-
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries[0].isIntersecting && visibleCount < filteredProducts.length) {
-          setVisibleCount((prev) => Math.min(prev + 50, filteredProducts.length));
-        }
-      },
-      { rootMargin: "200px" },
-    );
-
-    observer.observe(sentinel);
-    return () => observer.disconnect();
-  }, [visibleCount, filteredProducts.length]);
+  // Paginate: slice from sorted/filtered list
+  const totalPages = Math.max(1, Math.ceil(filteredProducts.length / ITEMS_PER_PAGE));
+  const displayedProducts = filteredProducts.slice(
+    (currentPage - 1) * ITEMS_PER_PAGE,
+    currentPage * ITEMS_PER_PAGE,
+  );
 
   // Wire up search field event listener (web components need addEventListener)
   useEffect(() => {
@@ -647,17 +653,17 @@ export default function ProductsPage() {
     const handler = (e: Event) => {
       const value = (e.target as HTMLInputElement)?.value ?? "";
       setSearchTerm(value);
-      setVisibleCount(50);
+      setCurrentPage(1);
     };
     el.addEventListener("input", handler);
     return () => el.removeEventListener("input", handler);
   }, []);
 
-  // Reset visible count when sorting changes
+  // Reset to first page when sorting changes
   // biome-ignore lint/correctness/useExhaustiveDependencies: deps are intentional triggers for sort reset
   useEffect(() => {
-    setVisibleCount(50);
-  }, [descriptionSort, brandSort, titleSort, typeSort, statusSort]);
+    setCurrentPage(1);
+  }, [descriptionSort, brandSort, titleSort, typeSort, statusSort, stockSort]);
 
   const toggleDescriptionSort = () => {
     setDescriptionSort((prev) => {
@@ -693,6 +699,14 @@ export default function ProductsPage() {
 
   const toggleStatusSort = () => {
     setStatusSort((prev) => {
+      if (prev === "none") return "asc";
+      if (prev === "asc") return "desc";
+      return "none";
+    });
+  };
+
+  const toggleStockSort = () => {
+    setStockSort((prev) => {
       if (prev === "none") return "asc";
       if (prev === "asc") return "desc";
       return "none";
@@ -917,6 +931,28 @@ export default function ProductsPage() {
                     : "↕"}
               </button>
             </s-table-header>
+            <s-table-header>
+              <button
+                type="button"
+                onClick={toggleStockSort}
+                style={{
+                  cursor: "pointer",
+                  userSelect: "none",
+                  background: "none",
+                  border: "none",
+                  padding: 0,
+                  font: "inherit",
+                  color: "inherit",
+                }}
+              >
+                Lagerantal{" "}
+                {stockSort === "asc"
+                  ? "↑"
+                  : stockSort === "desc"
+                    ? "↓"
+                    : "↕"}
+              </button>
+            </s-table-header>
             <s-table-header listSlot="secondary">
               <button
                 type="button"
@@ -1000,6 +1036,9 @@ export default function ProductsPage() {
                       )}
                     </s-table-cell>
                     <s-table-cell>
+                      {product.totalInventory ?? 0}
+                    </s-table-cell>
+                    <s-table-cell>
                       <s-stack direction="inline" gap="small">
                         {displayDescription ? (
                           <s-badge color="base" tone="success">
@@ -1049,19 +1088,30 @@ export default function ProductsPage() {
           </s-table-body>
         </s-table>
 
-        {/* Infinite scroll sentinel */}
-        {visibleCount < filteredProducts.length && (
-          <div ref={sentinelRef} style={{ height: "1px" }} />
-        )}
-        {visibleCount < filteredProducts.length && (
+        {/* Pagination controls */}
+        {totalPages > 1 && (
           <s-box padding="base">
-            <s-stack direction="inline" alignItems="center" gap="small">
-              <s-spinner accessibilityLabel="Indlæser flere produkter" />
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "12px" }}>
+              {/* biome-ignore lint/a11y/noStaticElementInteractions: Shopify web component handles interactivity */}
+              <s-button
+                variant="tertiary"
+                onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                disabled={currentPage === 1}
+              >
+                ← Forrige
+              </s-button>
               <s-text>
-                Viser {displayedProducts.length} af {filteredProducts.length}{" "}
-                produkter
+                Side {currentPage} af {totalPages} · {filteredProducts.length} produkter
               </s-text>
-            </s-stack>
+              {/* biome-ignore lint/a11y/noStaticElementInteractions: Shopify web component handles interactivity */}
+              <s-button
+                variant="tertiary"
+                onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                disabled={currentPage === totalPages}
+              >
+                Næste →
+              </s-button>
+            </div>
           </s-box>
         )}
       </s-section>

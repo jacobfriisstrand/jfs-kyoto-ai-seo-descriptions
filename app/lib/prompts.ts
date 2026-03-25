@@ -190,11 +190,17 @@ HTML-REGLER (UFRAVIGELIGE):
 - Forbudt: <strong>, <em>, <b>, <i>, <span>, <div>, <br>, <h1>, <h4>, <h5>, <h6> og alle andre elementer
 - Brug <p> til brødtekst, <h2>/<h3> til overskrifter, lister kun til ting der giver mening som liste
 
-DANSK GRAMMATIK:
-- Overskrifter: Kun stort begyndelsesbogstav, derefter normal dansk stavebrug
-- Korrekt: <h2>Materialer og pasform</h2>
-- Forkert: <h2>Materialer Og Pasform</h2>
-- Ingen Title Case – det er ikke dansk
+DANSK GRAMMATIK – KAPITALISERING ER UFRAVIGELIG:
+- VIGTIGSTE REGEL FOR OVERSKRIFTER: Kun det ALLERFØRSTE ord i en overskrift må have stort begyndelsesbogstav. Alle andre ord skrives med småt (medmindre det er et egennavn som et brandnavn)
+- Dette gælder ALLE overskrifter: <h2>, <h3>, og alle andre
+- KORREKT: <h2>Materialer og pasform</h2>
+- KORREKT: <h2>Sådan plejer du den</h2>
+- FORKERT: <h2>Materialer Og Pasform</h2>
+- FORKERT: <h2>Sådan Plejer Du Den</h2>
+- FORKERT: <h2>Design Og Detaljer</h2>
+- Title Case bruges IKKE på dansk. Hvert ord med stort begyndelsesbogstav er en fejl. Kun det første ord i sætningen/overskriften har stort bogstav
+- Gennemlæs ALLE dine overskrifter inden du afleverer og ret ethvert ord (ud over det første) der har stort begyndelsesbogstav
+- Denne regel gælder også for listeoverskrifter, kortere overskrifter og alle former for titler i teksten
 
 STRUKTUR:
 - 150-300 ord (kort og præcist – ikke fyld)
