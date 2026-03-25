@@ -28,6 +28,7 @@ interface ProductEdge {
     status?: string;
     tags?: string[];
     handle?: string;
+    totalInventory?: number;
     featuredImage?: { url?: string };
     metafields?: { edges?: MetafieldEdge[] };
     variants?: { edges?: VariantEdge[] };
@@ -55,6 +56,7 @@ export interface ProductData {
   materials?: string;
   handle?: string;
   featuredImage?: string;
+  totalInventory?: number;
 }
 
 export async function fetchProducts(
@@ -84,6 +86,7 @@ export async function fetchProducts(
               status
               tags
               handle
+              totalInventory
               featuredImage {
                 url
                 altText
@@ -131,6 +134,7 @@ export async function fetchProducts(
       tags: node.tags || [],
       handle: node.handle || undefined,
       featuredImage: node.featuredImage?.url || undefined,
+      totalInventory: node.totalInventory ?? undefined,
       metafields: node.metafields?.edges?.map((e: MetafieldEdge) => ({
         key: e.node.key,
         value: e.node.value,
@@ -169,6 +173,7 @@ export async function fetchProductById(
           status
           tags
           handle
+          totalInventory
           featuredImage {
             url
             altText
@@ -215,6 +220,7 @@ export async function fetchProductById(
     tags: product.tags || [],
     handle: product.handle || undefined,
     featuredImage: product.featuredImage?.url || undefined,
+    totalInventory: product.totalInventory ?? undefined,
     metafields: product.metafields?.edges?.map((e: MetafieldEdge) => ({
       key: e.node.key,
       value: e.node.value,
