@@ -2,7 +2,7 @@
 
 client_id = "ff6b0af2c297aa13fa7d2dc1658eb010"
 name = "AI SEO Produktbeskrivelser"
-application_url = "https://kyoto-ai-seo-descriptions.jacobfriisstrand.com"
+application_url = "https://kyoto-ai-seo-descriptions.jacobfri.is"
 embedded = true
 
 [build]
@@ -16,4 +16,4 @@ api_version = "2026-01"
 scopes = "write_products"
 
 [auth]
-redirect_urls = [ "https://kyoto-ai-seo-descriptions.jacobfriisstrand.com/auth/callback" ]
+redirect_urls = [ "https://kyoto-ai-seo-descriptions.jacobfri.is/auth/callback" ]
