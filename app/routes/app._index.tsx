@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { useFetcher, useLoaderData } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
@@ -31,18 +31,27 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const url = new URL(request.url);
   const cursor = url.searchParams.get("cursor") || undefined;
 
-  // If cursor is provided, this is a page navigation request
+  // If cursor is provided, this is a page navigation request.
+  // IMPORTANT: on transient error we surface `loadError: true` and KEEP
+  // hasNextPage=true with the SAME cursor so the client can retry. Returning
+  // hasNextPage:false here was the silent-stop bug that hid thousands of products.
   if (cursor) {
     try {
       const { products, hasNextPage, endCursor } = await fetchProducts(
         admin,
-        50,
+        250,
         cursor,
       );
       return { products, hasNextPage, endCursor, isLoadMore: true };
     } catch (error) {
       console.error("[app._index] Error loading more products:", error);
-      return { products: [], hasNextPage: false, endCursor: undefined, isLoadMore: true };
+      return {
+        products: [],
+        hasNextPage: true, // keep loop alive so client can retry
+        endCursor: cursor, // resume from same cursor
+        isLoadMore: true,
+        pageError: error instanceof Error ? error.message : "Unknown error",
+      };
     }
   }
 
@@ -50,7 +59,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     // Initial load: first batch + settings
     const { products, hasNextPage, endCursor } = await fetchProducts(
       admin,
-      50,
+      250,
     );
 
     // Get prompt template settings
@@ -394,30 +403,66 @@ export default function ProductsPage() {
     }
   }, [generateFetcher.data, generateFetcher.state, isGenerating, shopify]);
 
+  // Track consecutive failures to back off and eventually stop the auto-load loop
+  const loadRetryCountRef = useRef(0);
+  const [loadAllError, setLoadAllError] = useState<string | null>(null);
+
   // Auto-load all remaining products in background
   useEffect(() => {
     if (loadMoreFetcher.data && loadMoreFetcher.state === "idle" && loadMoreFetcher.data !== lastProcessedLoadMore.current) {
       lastProcessedLoadMore.current = loadMoreFetcher.data;
-      const data = loadMoreFetcher.data;
-      if ("products" in data && Array.isArray(data.products)) {
-        setAllProducts((prev) => {
-          const existingIds = new Set(prev.map((p) => p.id));
-          const newProducts = data.products.filter(
-            (p: ProductData) => !existingIds.has(p.id),
+      const data = loadMoreFetcher.data as {
+        products?: ProductData[];
+        hasNextPage?: boolean;
+        endCursor?: string;
+        pageError?: string;
+      };
+
+      // Server flagged a page-level error. Back off and retry the same cursor.
+      if (data.pageError) {
+        loadRetryCountRef.current += 1;
+        if (loadRetryCountRef.current >= 5) {
+          // Give up after 5 retries on the same cursor to avoid infinite loops.
+          setLoadAllError(
+            `Kunne ikke indlæse alle produkter: ${data.pageError}. ${allProducts.length} produkter blev indlæst.`,
           );
-          return [...prev, ...newProducts];
-        });
+          setHasMore(false);
+          setIsLoadingMore(false);
+          return;
+        }
+        // Exponential backoff: 1s, 2s, 4s, 8s, 16s
+        const backoff = 1000 * 2 ** (loadRetryCountRef.current - 1);
+        setIsLoadingMore(false);
+        const timer = setTimeout(() => {
+          // Force re-trigger of the auto-load effect
+          setHasMore((h) => h);
+        }, backoff);
+        return () => clearTimeout(timer);
+      }
+
+      if (Array.isArray(data.products)) {
+        loadRetryCountRef.current = 0; // reset on success
+        const incoming = data.products;
+        if (incoming.length > 0) {
+          setAllProducts((prev) => {
+            const existingIds = new Set(prev.map((p) => p.id));
+            const newProducts = incoming.filter(
+              (p: ProductData) => !existingIds.has(p.id),
+            );
+            return newProducts.length === 0 ? prev : [...prev, ...newProducts];
+          });
+        }
         setHasMore(data.hasNextPage ?? false);
         setNextCursor(data.endCursor ?? undefined);
         setIsLoadingMore(false);
       }
     }
-  }, [loadMoreFetcher.data, loadMoreFetcher.state]);
+  }, [loadMoreFetcher.data, loadMoreFetcher.state, allProducts.length]);
 
   useEffect(() => {
     if (hasMore && nextCursor && !isLoadingMore && loadMoreFetcher.state === "idle") {
       setIsLoadingMore(true);
-      loadMoreFetcher.load(`/app?index&cursor=${nextCursor}`);
+      loadMoreFetcher.load(`/app?index&cursor=${encodeURIComponent(nextCursor)}`);
     }
   }, [hasMore, nextCursor, isLoadingMore, loadMoreFetcher]);
 
@@ -434,11 +479,11 @@ export default function ProductsPage() {
   };
 
   const handleSelectAll = () => {
-    if (selectedProductIds.size === allProducts.length) {
-      setSelectedProductIds(new Set());
-    } else {
-      setSelectedProductIds(new Set(allProducts.map((p) => p.id)));
-    }
+    setSelectedProductIds(new Set(allProducts.map((p) => p.id)));
+  };
+
+  const handleDeselectAll = () => {
+    setSelectedProductIds(new Set());
   };
 
   const handleGenerate = () => {
@@ -566,8 +611,11 @@ export default function ProductsPage() {
     return match ? `shopify://admin/products/${match[1]}` : "#";
   };
 
-  // Sort products: generated always float to top, then by active sort
-  const sortedProducts = [...allProducts].sort((a, b) => {
+  // Sort products: generated always float to top, then by active sort.
+  // Memoized because allProducts can grow to thousands and resorting on
+  // every render (e.g. each checkbox toggle) was a major perf bottleneck.
+  const sortedProducts = useMemo(() => {
+    return [...allProducts].sort((a, b) => {
     // Generated descriptions always come first
     const aGenerated = generatedDescriptions.has(a.id);
     const bGenerated = generatedDescriptions.has(b.id);
@@ -626,18 +674,28 @@ export default function ProductsPage() {
 
     return 0;
   });
+  }, [
+    allProducts,
+    generatedDescriptions,
+    titleSort,
+    brandSort,
+    typeSort,
+    statusSort,
+    stockSort,
+    descriptionSort,
+  ]);
 
-  // Filter by search term
-  const filteredProducts = searchTerm
-    ? sortedProducts.filter((p) => {
-        const term = searchTerm.toLowerCase();
-        return (
-          (p.title || "").toLowerCase().includes(term) ||
-          (p.vendor || "").toLowerCase().includes(term) ||
-          (p.productType || "").toLowerCase().includes(term)
-        );
-      })
-    : sortedProducts;
+  // Filter by search term — memoized for the same reason as sort.
+  const filteredProducts = useMemo(() => {
+    if (!searchTerm) return sortedProducts;
+    const term = searchTerm.toLowerCase();
+    return sortedProducts.filter(
+      (p) =>
+        (p.title || "").toLowerCase().includes(term) ||
+        (p.vendor || "").toLowerCase().includes(term) ||
+        (p.productType || "").toLowerCase().includes(term),
+    );
+  }, [sortedProducts, searchTerm]);
 
   // Paginate: slice from sorted/filtered list
   const totalPages = Math.max(1, Math.ceil(filteredProducts.length / ITEMS_PER_PAGE));
@@ -755,6 +813,9 @@ export default function ProductsPage() {
       {loadError && (
         <s-banner tone="critical">{loadError}</s-banner>
       )}
+      {loadAllError && (
+        <s-banner tone="warning">{loadAllError}</s-banner>
+      )}
       <s-section heading="Tips">
         <s-unordered-list>
           <s-list-item>
@@ -815,7 +876,7 @@ export default function ProductsPage() {
 
       <s-section padding="none" accessibilityLabel="Produkter tabel">
         <s-table>
-          <s-grid slot="filters" gap="small-200" gridTemplateColumns="1fr auto 220px">
+          <s-grid slot="filters" gap="small-200" gridTemplateColumns="1fr auto auto 220px" alignItems="center">
             <s-text-field
               ref={searchRef as React.Ref<never>}
               label="Søg produkter"
@@ -824,12 +885,22 @@ export default function ProductsPage() {
               placeholder="Søg efter produkter"
             />
             {/* biome-ignore lint/a11y/noStaticElementInteractions: Shopify web component handles interactivity */}
-            <s-button onClick={handleSelectAll} variant="secondary">
-              {selectedProductIds.size === allProducts.length
-                ? "Fravælg alle"
-                : "Vælg alle"}
+            <s-button
+              onClick={handleSelectAll}
+              variant="secondary"
+              disabled={selectedProductIds.size === allProducts.length}
+            >
+              Vælg alle
             </s-button>
-            <div style={{ whiteSpace: "nowrap" }}>
+            {/* biome-ignore lint/a11y/noStaticElementInteractions: Shopify web component handles interactivity */}
+            <s-button
+              onClick={handleDeselectAll}
+              variant="secondary"
+              disabled={selectedProductIds.size === 0}
+            >
+              Fravælg alle
+            </s-button>
+            <div style={{ whiteSpace: "nowrap", display: "flex", alignItems: "center", height: "100%" }}>
             <s-stack direction="inline" gap="small" alignItems="center">
               <s-text>
                 {selectedProductIds.size} af {allProducts.length} valgt
@@ -1153,11 +1224,12 @@ export default function ProductsPage() {
               )}
             </s-stack>
           ) : modalProduct.description ? (
+            // List query now fetches `descriptionHtml`, so render as HTML
+            // to preserve paragraphs, lists, and other formatting from the
+            // Shopify product editor.
             <div
-            // biome-ignore lint/security/noDangerouslySetInnerHtml: HTML description from Shopify admin
-              dangerouslySetInnerHTML={{
-                __html: modalProduct.description || "",
-              }}
+              // biome-ignore lint/security/noDangerouslySetInnerHtml: Shopify-owned content
+              dangerouslySetInnerHTML={{ __html: modalProduct.description }}
               style={{ maxHeight: "500px", overflow: "auto" }}
             />
           ) : (
